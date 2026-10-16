@@ -891,6 +891,48 @@ void FreeInkDisplay::displayGrayBuffer(bool turnOffScreen, const unsigned char* 
   _driver->displayGray(_bus, frameBuffer, turnOffScreen, lut, factoryMode);
 }
 
+#if FREEINK_CAP_DISPLAY_LAB
+bool FreeInkDisplay::labSupported() const { return _driver != nullptr && _driver->labSupported(); }
+
+bool FreeInkDisplay::labUploadWaveform(const uint8_t* bytes, size_t len) {
+  if (_inverted || _driver == nullptr) return false;
+  cancelGrayscalePass();
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  return _driver->labUploadWaveform(_bus, bytes, len);
+}
+
+bool FreeInkDisplay::labSetFrameRate(uint8_t code) {
+  if (_inverted || _driver == nullptr) return false;
+  cancelGrayscalePass();
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  return _driver->labSetFrameRate(_bus, code);
+}
+
+bool FreeInkDisplay::labScan(const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) {
+  busyUs = 0;
+  if (_inverted || _driver == nullptr) return false;
+  cancelGrayscalePass();
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  if (!_driver->labScan(_bus, plane1, plane2, busyUs)) return false;
+  // As displayGrayBuffer: controller RAM no longer holds the B/W baseline.
+  _shadowValid = false;
+  _redRamSynced = false;
+  return true;
+}
+
+void FreeInkDisplay::labEnd() {
+  if (_driver == nullptr) return;
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  _driver->labEnd(_bus);
+  _shadowValid = false;
+  _redRamSynced = false;
+}
+#endif
+
 void FreeInkDisplay::displayGrayCalibration(uint16_t customX, uint16_t customY, uint16_t customW, uint16_t customH) {
   cancelGrayscalePass();
   if (_inverted) return;

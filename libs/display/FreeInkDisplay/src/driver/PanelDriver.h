@@ -17,6 +17,12 @@
 #include "../../include/GrayscaleCapabilities.h"
 #include "../bus/EpdBus.h"
 
+// Opt-in display lab (see docs/display-lab.md). Default 0: no lab declaration
+// or definition is compiled, so stock builds carry no code for it.
+#ifndef FREEINK_CAP_DISPLAY_LAB
+#define FREEINK_CAP_DISPLAY_LAB 0
+#endif
+
 namespace freeink {
 
 enum class RefreshMode : uint8_t { Full, Half, Fast };
@@ -268,6 +274,54 @@ class PanelDriver {
     (void)enabled;
     (void)data;
   }
+
+#if FREEINK_CAP_DISPLAY_LAB
+  // --- display lab (bench API, FREEINK_CAP_DISPLAY_LAB) ---
+  // Drives a caller-supplied waveform with caller-supplied raw planes, for
+  // measuring a panel on the bench. Volatile registers only: no driver ever
+  // sends an OTP/MTP programming command here. A session is
+  //   labUploadWaveform -> [labSetFrameRate] -> labScan... -> labEnd
+  // and the caller must call labEnd() before any other display call: ordinary
+  // refreshes neither restore the lab's registers (UltraChip PLL) nor keep its
+  // waveform loaded. Defaults report "unsupported" and touch no bus.
+  virtual bool labSupported() const { return false; }
+  // Controller-specific waveform bytes. SSD1677: the 112-byte LUT layout of
+  // Ssd1677Luts.h (bytes 0-104 via 0x32, 105 via 0x03, 106-108 via 0x04, 109
+  // via 0x2C; 110-111 reserved). UltraChip: five register-prefixed tables of
+  // 43 bytes (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK, in that order),
+  // uploaded with PSR REG=1. False (and no bus traffic) for any other length
+  // or prefix.
+  virtual bool labUploadWaveform(EpdBus& bus, const uint8_t* bytes, size_t len) {
+    (void)bus;
+    (void)bytes;
+    (void)len;
+    return false;
+  }
+  // Frame-rate code. UltraChip writes it verbatim to PLL (0x30); SSD1677
+  // returns false (its rate lives in the LUT bytes).
+  virtual bool labSetFrameRate(EpdBus& bus, uint8_t code) {
+    (void)bus;
+    (void)code;
+    return false;
+  }
+  // One activation with raw full-screen planes in the framebuffer's byte order
+  // (no inversion, no folding with any base; the driver applies only its gate
+  // padding / row-order mapping, so a plane lands where an ordinary refresh
+  // would put the same bytes). Refuses (false, no bus traffic) until
+  // labUploadWaveform() has succeeded. busyUs = microseconds from activation
+  // to BUSY release.
+  virtual bool labScan(EpdBus& bus, const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) {
+    (void)bus;
+    (void)plane1;
+    (void)plane2;
+    busyUs = 0;
+    return false;
+  }
+  // Leaves the lab: restores the registers the lab changed to the driver's
+  // config and forces the next ordinary refresh to a full resync. A no-op
+  // when no lab call has run since the last labEnd().
+  virtual void labEnd(EpdBus& bus) { (void)bus; }
+#endif
 };
 
 }  // namespace freeink

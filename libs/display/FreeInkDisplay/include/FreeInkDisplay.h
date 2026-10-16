@@ -19,6 +19,11 @@
 #include "../src/bus/EpdBus.h"
 #include "GrayscaleCapabilities.h"
 
+// Opt-in display lab (see docs/display-lab.md). Default 0: no lab code.
+#ifndef FREEINK_CAP_DISPLAY_LAB
+#define FREEINK_CAP_DISPLAY_LAB 0
+#endif
+
 namespace freeink {
 
 class PanelDriver;
@@ -292,6 +297,23 @@ class FreeInkDisplay {
 
   // Power management
   void deepSleep();
+
+#if FREEINK_CAP_DISPLAY_LAB
+  // Display lab: a bench API that drives a caller-supplied waveform with raw
+  // caller-supplied planes (see PanelDriver and docs/display-lab.md for the
+  // per-controller byte layouts and register sequences). Each call waits out
+  // a pending async refresh first. Everything but labSupported() and labEnd()
+  // refuses (returns false, no bus traffic) while output is inverted, since
+  // the planes are sent raw. Call labEnd() before any other display call; the
+  // next ordinary refresh after it is a full resync.
+  bool labSupported() const;
+  bool labUploadWaveform(const uint8_t* bytes, size_t len);
+  bool labSetFrameRate(uint8_t code);
+  // plane1/plane2: full-screen planes in the framebuffer's byte order (SSD1677
+  // BW/RED RAM, UltraChip DTM1/DTM2). busyUs: activation to BUSY release.
+  bool labScan(const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs);
+  void labEnd();
+#endif
 
   // Optional hooks fired around long BUSY waits (~0.3-2 s per refresh), so host
   // firmware can apply its own power policy (e.g. reduce the CPU clock) for the

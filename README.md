@@ -363,6 +363,7 @@ tight. Each defaults on when an included device needs it; force with `=0`/`=1`:
 | `FREEINK_CAP_BUZZER` | LEDC PWM tone buzzer (Buzzer lib: tone/beep on `audio.buzzer`) | on for Sticky, Murphy, and Paper Mono |
 | `FREEINK_CAP_LED` | RGB LEDs (LedManager: addressable chains, or the Paper Mono's discrete PMIC/expander-driven LED) | on for M5 and Paper Mono |
 | `FREEINK_CAP_NET_TLS13` | wolfSSL TLS 1.3 (≡ `FREEINK_NET_WOLFSSL`) | off |
+| `FREEINK_CAP_DISPLAY_LAB` | bench API driving caller-supplied waveforms and raw planes on SSD1677, UC8179 and the X4 Pro UC8279 ([display lab](docs/display-lab.md)) | off |
 
 **Other flags:**
 

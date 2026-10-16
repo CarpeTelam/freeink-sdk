@@ -101,7 +101,28 @@ class Uc8179Driver : public PanelDriver {
   void displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, const unsigned char* lut, bool factoryMode) override;
   void cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) override;
 
+#if FREEINK_CAP_DISPLAY_LAB
+  // Display lab (see PanelDriver). Upload: PSR psr0 (REG=1), the five 42-byte
+  // tables, CDI cdiActive (the AA path's registers). Scan: DTM1/DTM2 through
+  // streamPlane (rows reversed, gates 480-599 padded 0xFF in both planes),
+  // PON if off, DRF, BUSY wait; power stays on. labEnd: PSR psr0 & 0xDF
+  // (OTP), CDI cdiIdle, PLL 50 Hz (0x06, the rate displayGray restores),
+  // TSSET tsset. Never writes PWR (0x01), VDCS (0x82) or an OTP command.
+  bool labSupported() const override { return true; }
+  bool labUploadWaveform(EpdBus& bus, const uint8_t* bytes, size_t len) override;
+  bool labSetFrameRate(EpdBus& bus, uint8_t code) override;
+  bool labScan(EpdBus& bus, const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) override;
+  void labEnd(EpdBus& bus) override;
+#endif
+
  private:
+#if FREEINK_CAP_DISPLAY_LAB
+  // First lab call of a session: leave any direct-gray power configuration and
+  // drop every B/W/AA baseline the lab is about to overwrite.
+  void labEnter(EpdBus& bus);
+  bool _labActive = false;
+  bool _labWaveformLoaded = false;
+#endif
   void initController(EpdBus& bus);
   void startBwRefresh(EpdBus& bus, bool fast);
   void configureDirectGrayscale(EpdBus &bus);

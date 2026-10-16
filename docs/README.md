@@ -14,6 +14,7 @@ Device build flags and dependencies are in [platformio.sample.ini](../platformio
 | [MCU portability](consumer-mcu-portability.md) | Runtime profiles, GPIO wakeup, and C3/S3 differences |
 | [BLE keyboard host](ble-keyboard-host.md) | Enabling and using BLE HID input |
 | [Haptic feedback](haptics.md) | Consumer-triggered vibration, PWM intensity and asynchronous patterns |
+| [Display lab](display-lab.md) | Bench API for caller-supplied waveforms and raw planes (`FREEINK_CAP_DISPLAY_LAB`) |
 | [Testing](testing.md) | Local host regression suites and validation limits |
 
 ## Board support

@@ -110,7 +110,28 @@ class Uc8279X4Driver : public PanelDriver {
   // scrub because it arrives through display()/displayStart, not this entry.
   void displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) override;
 
+#if FREEINK_CAP_DISPLAY_LAB
+  // Display lab (see PanelDriver). Upload: PSR psr0 (REG=1), the five tables
+  // (each 42 caller bytes plus 7 zero bytes, filling this controller's 49-byte
+  // LUT register so no group of an earlier AA bank survives), CDI cdiAa.
+  // Scan: DTM1/DTM2 through streamPlane with inversion OFF (rows forward from
+  // gateOffset, gates before it padded 0xFF in both planes), PON if off, PSR
+  // rewritten after PON (it only latches there), DRF, BUSY wait; power stays
+  // on. Frame rate: PLL, refused on X4 Classic, whose stock never writes PLL.
+  // labEnd: PSR psr0 & 0xDF (OTP), CDI cdiBwFull, PLL pll, TSSET tsset.
+  bool labSupported() const override { return true; }
+  bool labUploadWaveform(EpdBus& bus, const uint8_t* bytes, size_t len) override;
+  bool labSetFrameRate(EpdBus& bus, uint8_t code) override;
+  bool labScan(EpdBus& bus, const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) override;
+  void labEnd(EpdBus& bus) override;
+#endif
+
  private:
+#if FREEINK_CAP_DISPLAY_LAB
+  void labEnter();
+  bool _labActive = false;
+  bool _labWaveformLoaded = false;
+#endif
   void initController(EpdBus& bus);
   void startBwRefresh(EpdBus& bus, bool fast);
   // Stream a framebuffer into a RAM plane: 0xFF padding for gates before the

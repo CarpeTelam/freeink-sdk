@@ -902,6 +902,55 @@ void Ssd1677Driver::setCustomLut(EpdBus& bus, bool enabled, const unsigned char*
   _customLutActive = true;
 }
 
+#if FREEINK_CAP_DISPLAY_LAB
+bool Ssd1677Driver::labUploadWaveform(EpdBus& bus, const uint8_t* bytes, size_t len) {
+  if (bytes == nullptr || len != LAB_LUT_BYTES) return false;
+  _labActive = true;
+  // The overlay path's register writes: LUT 0x32 (0-104), VGH 0x03 (105),
+  // VSH1/VSH2/VSL 0x04 (106-108), VCOM 0x2C (109), border parked per config.
+  // The voltages are the caller's, exactly as displayGray(lut) writes them.
+  setCustomLut(bus, true, bytes);
+  // The loaded waveform is the lab's alone: an ordinary refresh must keep its
+  // OTP/board-LUT selection, so do not leave the custom-LUT flag set.
+  setCustomLut(bus, false, nullptr);
+  _labWaveformLoaded = true;
+  return true;
+}
+
+bool Ssd1677Driver::labScan(EpdBus& bus, const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) {
+  busyUs = 0;
+  if (!_labWaveformLoaded || plane1 == nullptr || plane2 == nullptr) return false;
+  // Same RAM window and counters as an ordinary full-frame write, so the panel's
+  // reversed gates (and any mirrorX/mirrorY mount) map the planes exactly as the
+  // B/W path maps the framebuffer. Bytes go out as given.
+  setRamArea(bus, 0, 0, _w, _h);
+  writeRam(bus, CMD_WRITE_RAM_BW, plane1, _bufferSize);
+  writeRam(bus, CMD_WRITE_RAM_RED, plane2, _bufferSize);
+  bus.cmd(CMD_DISPLAY_UPDATE_CTRL1);
+  bus.data(CTRL1_NORMAL);  // a prior HALF leaves BYPASS_RED set
+  bus.cmd(CMD_DISPLAY_UPDATE_CTRL2);
+  bus.data(0xCC);  // CLOCK_ON|ANALOG_ON|MODE_SELECT|DISPLAY_START, no OTP LUT load
+  bus.cmd(CMD_MASTER_ACTIVATION);
+  const unsigned long start = micros();
+  bus.waitRefreshComplete("lab_scan");
+  busyUs = static_cast<uint32_t>(micros() - start);
+  _isScreenOn = true;
+  _needsGrayClear = true;  // RAM and ink no longer match any B/W baseline
+  return true;
+}
+
+void Ssd1677Driver::labEnd(EpdBus& bus) {
+  (void)bus;
+  if (!_labActive) return;
+  _labActive = false;
+  _labWaveformLoaded = false;
+  _customLutActive = false;
+  // The next refresh is promoted to the clean HALF/FULL, whose OTP sequence
+  // reloads the LUT and voltages and rewrites CTRL1, the border and both planes.
+  _needsGrayClear = true;
+}
+#endif
+
 void Ssd1677Driver::deepSleep(EpdBus& bus) {
   // Stock parity (_powerOff): park the border at its init value so it is not left
   // driven with the full-refresh waveform through deep sleep, then power down

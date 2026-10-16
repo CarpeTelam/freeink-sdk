@@ -123,7 +123,22 @@ class Ssd1677Driver : public PanelDriver {
   // Stock 7.4.4 has a dedicated grey_revert waveform, but it is not yet ported.
   void setCustomLut(EpdBus& bus, bool enabled, const unsigned char* data) override;
 
+#if FREEINK_CAP_DISPLAY_LAB
+  // Display lab (see PanelDriver). The waveform upload is setCustomLut()'s
+  // register path; a scan writes the planes to BW (0x24) and RED (0x26) with
+  // the ordinary RAM window, then activates 0x21=0x00, 0x22=0xCC, 0x20.
+  static constexpr size_t LAB_LUT_BYTES = 112;
+  bool labSupported() const override { return true; }
+  bool labUploadWaveform(EpdBus& bus, const uint8_t* bytes, size_t len) override;
+  bool labScan(EpdBus& bus, const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) override;
+  void labEnd(EpdBus& bus) override;
+#endif
+
  private:
+#if FREEINK_CAP_DISPLAY_LAB
+  bool _labActive = false;          // a lab call ran since the last labEnd()
+  bool _labWaveformLoaded = false;  // labUploadWaveform() succeeded this session
+#endif
   bool _pendingFrameSync = false;
   bool _needsGrayClear = false;
   bool _absoluteInput = false;

@@ -825,6 +825,107 @@ void Uc8279X4Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
   // RAM restoration does not cancel a requested physical clean.
 }
 
+#if FREEINK_CAP_DISPLAY_LAB
+namespace {
+// Five register-prefixed tables: 0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK.
+constexpr size_t LAB_TABLES = 5;
+constexpr size_t LAB_ROW = PREBW_LUT_LEN + 1;
+
+bool labTablesValid(const uint8_t* bytes, size_t len) {
+  if (bytes == nullptr || len != LAB_TABLES * LAB_ROW) return false;
+  for (size_t t = 0; t < LAB_TABLES; t++) {
+    if (bytes[t * LAB_ROW] != 0x20 + t) return false;
+  }
+  return true;
+}
+}  // namespace
+
+void Uc8279X4Driver::labEnter() {
+  if (_labActive) return;
+  _labActive = true;
+  _directGrayOnPanel = false;
+  _grayImagePass = false;
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _grayBaseValid = false;
+  _absoluteGrayPlanes = false;
+  _oldPlaneValid = false;
+  _redriveAfterGray = false;
+  _needFullClear = true;
+}
+
+bool Uc8279X4Driver::labUploadWaveform(EpdBus& bus, const uint8_t* bytes, size_t len) {
+  if (!labTablesValid(bytes, len)) return false;
+  labEnter();
+  bus.waitBusy(" 8279x4_lab_lut_ready");  // LUT writes are dropped while BUSY
+  bus.cmd(CMD_PANEL_SETTING);
+  bus.data(_cfg.psr0);  // REG=1: refresh from the LUT registers
+  bus.data(_cfg.psr1);
+  uint8_t table[GRAY_LUT_LEN] = {};  // group 7 stays zero: no frames
+  for (size_t t = 0; t < LAB_TABLES; t++) {
+    const uint8_t* row = bytes + t * LAB_ROW;
+    memcpy(table, row + 1, PREBW_LUT_LEN);
+    bus.cmd(row[0]);
+    bus.data(table, GRAY_LUT_LEN);
+  }
+  bus.cmd(CMD_VCOM_DATA_INTERVAL);
+  bus.data(_cfg.cdiAa);  // the AA activation's CDI, so plane bits map to tables as there
+  _labWaveformLoaded = true;
+  return true;
+}
+
+bool Uc8279X4Driver::labSetFrameRate(EpdBus& bus, uint8_t code) {
+  // X4 Classic stock never programs PLL, so there is no config value to restore.
+  if (BoardConfig::isX4Classic()) return false;
+  labEnter();
+  bus.cmd(CMD_PLL);
+  bus.data(code);
+  return true;
+}
+
+bool Uc8279X4Driver::labScan(EpdBus& bus, const uint8_t* plane1, const uint8_t* plane2, uint32_t& busyUs) {
+  busyUs = 0;
+  // PSR REG=1 is set only by labUploadWaveform; refuse to scan an OTP waveform.
+  if (!_labWaveformLoaded || plane1 == nullptr || plane2 == nullptr) return false;
+  bus.waitBusy(" 8279x4_lab_ready");
+  streamPlane(bus, CMD_DTM1, plane1, /*invert=*/false);
+  streamPlane(bus, CMD_DTM2, plane2, /*invert=*/false);
+  powerOnIfNeeded(bus, " 8279x4_lab_PON");
+  // PON reloads PSR from MTP; only a post-PON write latches (as displayGray).
+  bus.cmd(CMD_PANEL_SETTING);
+  bus.data(_cfg.psr0);
+  bus.data(_cfg.psr1);
+  bus.cmd(CMD_DISPLAY_REFRESH);
+  const unsigned long start = micros();
+  bus.waitRefreshComplete(" 8279x4_lab_DRF");
+  busyUs = static_cast<uint32_t>(micros() - start);
+  // Power stays on between scans (no POF), as in the AA path.
+  return true;
+}
+
+void Uc8279X4Driver::labEnd(EpdBus& bus) {
+  if (!_labActive) return;
+  _labActive = false;
+  _labWaveformLoaded = false;
+  bus.waitBusy(" 8279x4_lab_end");
+  bus.cmd(CMD_PANEL_SETTING);
+  bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG=0: OTP waveforms
+  bus.data(_cfg.psr1);
+  bus.cmd(CMD_VCOM_DATA_INTERVAL);
+  bus.data(_cfg.cdiBwFull);
+  if (!BoardConfig::isX4Classic()) {  // same condition as initController
+    bus.cmd(CMD_PLL);
+    bus.data(_cfg.pll);
+  }
+  bus.cmd(CMD_TSSET);
+  bus.data(_cfg.tsset);
+  // Neither plane holds a displayed B/W frame: the next refresh is a full GC.
+  _needFullClear = true;
+  _oldPlaneValid = false;
+  _redriveAfterGray = false;
+}
+#endif
+
 // Per-board config injection, same idiom as the other drivers: define
 // `const Uc8279X4Config& yourConfig();` in namespace freeink and build with
 // -DFREEINK_UC8279_X4_CONFIG=yourConfig.
