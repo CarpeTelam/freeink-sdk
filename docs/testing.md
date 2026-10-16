@@ -76,6 +76,16 @@ compiles the facade in single- and dual-buffer modes. The checks cover transfer
 sequences, grayscale uploads, refresh lifecycle, and power-state behavior for
 the drivers included in each harness.
 
+The Pro suite builds each mode twice, with `FREEINK_CAP_DISPLAY_LAB` 0 and 1.
+The lab build adds the [display lab](display-lab.md) checks, and a `trace` run
+of each build hashes the stock register sequences of the Pro drivers and the
+facade; the suite fails unless both builds agree. The other display suites
+compile the lab in when the environment sets it:
+
+```sh
+FREEINK_CAP_DISPLAY_LAB=1 python3 libs/display/FreeInkDisplay/test/host/run_uc8279.py
+```
+
 For the board-profile and display-probe regression test, follow the
 [XteinkDetect host instructions](../libs/hardware/XteinkDetect/test/host/README.md).
 

@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+# Set FREEINK_CAP_DISPLAY_LAB=1 in the environment to build with the display lab compiled in.
+LAB_FLAG = os.environ.get("FREEINK_CAP_DISPLAY_LAB")
+LAB = ["-DFREEINK_CAP_DISPLAY_LAB=" + LAB_FLAG] if LAB_FLAG else []
 SOURCE = HERE.parents[1] / "src"
 with tempfile.TemporaryDirectory(prefix="uc8279c-a4-test-") as directory:
     root = Path(directory)
@@ -85,6 +88,6 @@ public:
     (root / "esp_heap_caps.h").write_text("#pragma once\n#include <cstdlib>\n#define MALLOC_CAP_SPIRAM 1\n#define MALLOC_CAP_8BIT 2\ninline void* heap_caps_malloc(size_t n, int) { return malloc(n); }\n")
     exe = root / "test_uc8279c_a4"
     subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
-                    "-Wno-unused-parameter", "-I"+str(root), str(HERE / "test_uc8279c_a4.cpp"),
+                    "-Wno-unused-parameter", *LAB, "-I"+str(root), str(HERE / "test_uc8279c_a4.cpp"),
                     str(root / "driver/Uc8279cA4Driver.cpp"), "-o", str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

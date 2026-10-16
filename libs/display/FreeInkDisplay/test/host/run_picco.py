@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+# Set FREEINK_CAP_DISPLAY_LAB=1 in the environment to build with the display lab compiled in.
+LAB_FLAG = os.environ.get("FREEINK_CAP_DISPLAY_LAB")
+LAB = ["-DFREEINK_CAP_DISPLAY_LAB=" + LAB_FLAG] if LAB_FLAG else []
 LIB = HERE.parents[1]
 with tempfile.TemporaryDirectory(prefix="freeink-picco-test-") as directory:
     root = Path(directory)
@@ -67,7 +70,7 @@ inline FakeSerial Serial;
 """
     (root / "Arduino.h").write_text('#include "BoardConfig.h"\n' + arduino)
     exe = root / "picco"
-    subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Wno-unused-parameter",
+    subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Wno-unused-parameter", *LAB,
                     "-Wno-unused-function", "-DARDUINO=1", "-DFREEINK_DEVICE_PICCO=1", "-I" + str(root),
                     str(HERE / "test_picco.cpp"), str(root / "src/driver/Ssd1677Driver.cpp"),
                     str(root / "src/driver/Ssd2677Driver.cpp"), "-o", str(exe)],
@@ -75,7 +78,7 @@ inline FakeSerial Serial;
     # The facade's Picco driver selection must compile in a Picco build.
     shutil.copy2(LIB / "src/FreeInkDisplay.cpp", root / "src/FreeInkDisplay.cpp")
     shutil.copy2(LIB / "include/FreeInkDisplay.h", root / "include/FreeInkDisplay.h")
-    subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-fsyntax-only", "-DARDUINO=1",
+    subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-fsyntax-only", "-DARDUINO=1", *LAB,
                     "-DFREEINK_DEVICE_PICCO=1", "-DFREEINK_DRIVER_SSD1677=1", "-I" + str(root),
                     "-I" + str(root / "include"), str(root / "src/FreeInkDisplay.cpp")], check=True)
     for panel in ("yrd", "depg", "opm", "unknown", "se0400"):

@@ -8,5 +8,6 @@
 #define PROGMEM
 #define pgm_read_byte(p) (*(p))
 inline unsigned long millis() { static unsigned long t; return ++t; }
+inline unsigned long micros() { static unsigned long t; return t += 997; }
 inline void delay(unsigned long) {}
 inline int digitalRead(int) { return 0; }

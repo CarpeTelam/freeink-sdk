@@ -612,7 +612,411 @@ static void testMetalio() {
   assert(lastRegister(bus, 0x10) == 0x03);
 }
 
+// --- stock-sequence trace -------------------------------------------------
+// Hashes every recorded write (command, payload, CS framing) and wait of a
+// fixed set of stock operations. run_pro.py builds with the display lab off
+// and on and requires identical output, so the lab cannot alter a stock path.
+static uint64_t hashBus(const EpdBus& bus) {
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint32_t v) {
+    for (unsigned i = 0; i < 4; ++i) {
+      h ^= uint8_t(v >> (8 * i));
+      h *= 1099511628211ull;
+    }
+  };
+  for (const auto& w : bus.writes) {
+    mix(w.command);
+    mix(w.transactions);
+    mix(uint32_t(w.bytes.size()));
+    for (uint8_t b : w.bytes) {
+      h ^= b;
+      h *= 1099511628211ull;
+    }
+  }
+  mix(bus.waits);
+  return h;
+}
+
+static void traceStep(EpdBus& bus, const char* who, const char* op) {
+  std::printf("%s %s %016llx\n", who, op, static_cast<unsigned long long>(hashBus(bus)));
+  bus.clear();
+}
+
+template<class Driver>
+static void traceDriver(const char* who) {
+  Driver d;
+  EpdBus bus;
+  const auto a = frame(5), b = frame(71), lsb = frame(13), msb = frame(29);
+  d.begin(bus);
+  traceStep(bus, who, "begin");
+  d.display(bus, a.data(), nullptr, RefreshMode::Full, false);
+  traceStep(bus, who, "full");
+  d.display(bus, b.data(), nullptr, RefreshMode::Fast, false);
+  traceStep(bus, who, "fast");
+  d.display(bus, a.data(), b.data(), RefreshMode::Half, false);
+  traceStep(bus, who, "half");
+  d.displayStart(bus, b.data(), a.data(), RefreshMode::Fast, false);
+  d.displayFinish(bus, b.data());
+  traceStep(bus, who, "async");
+  for (auto mode : {GrayscaleMode::Overlay, GrayscaleMode::Absolute, GrayscaleMode::Direct}) {
+    if (!d.grayscaleCapabilities(mode).supported()) continue;
+    d.beginGrayscale(bus, a.data(), mode, RefreshMode::Fast, false);
+    d.copyGrayscaleLsb(bus, lsb.data());
+    d.copyGrayscaleMsb(bus, msb.data());
+    d.displayGray(bus, msb.data(), false, nullptr, mode != GrayscaleMode::Overlay);
+    d.cleanupGrayscaleBuffers(bus, a.data());
+    d.display(bus, b.data(), nullptr, RefreshMode::Fast, false);
+    traceStep(bus, who, "gray");
+  }
+  d.displayGray(bus, a.data(), false, lut_grayscale, false);
+  d.display(bus, a.data(), nullptr, RefreshMode::Fast, true);
+  traceStep(bus, who, "custom-lut");
+  d.display(bus, b.data(), nullptr, RefreshMode::Full, true);
+  d.display(bus, a.data(), nullptr, RefreshMode::Half, true);
+  traceStep(bus, who, "power-off");
+  d.deepSleep(bus);
+  traceStep(bus, who, "sleep");
+  if constexpr (!std::is_same<Driver, Ssd1677Driver>::value) free(d._grayBase);
+}
+
+template<class Driver>
+static void traceFacade(const char* who) {
+  Driver driver;
+  FreeInkDisplay display(1, 2, 3, 4, 5, 6);
+  display._driver = &driver;
+  display.begin();
+  const auto a = frame(8), lsb = frame(13), msb = frame(29);
+  std::memcpy(display.getFrameBuffer(), a.data(), a.size());
+  traceStep(display._bus, who, "begin");
+  display.displayBuffer(FreeInkDisplay::FULL_REFRESH);
+  display.displayBufferAsync(FreeInkDisplay::FAST_REFRESH);
+  display.waitRefreshComplete();
+  traceStep(display._bus, who, "refresh");
+  if (display.displayGrayscaleBase(GrayscaleMode::Absolute)) {
+    display.copyGrayscaleBuffers(lsb.data(), msb.data());
+    display.displayGrayBuffer(false);
+    display.cleanupGrayscaleBuffers(a.data());
+    traceStep(display._bus, who, "gray");
+  }
+  display.setInverted(true);
+  display.displayBuffer(FreeInkDisplay::FAST_REFRESH);
+  display.setInverted(false);
+  display.deepSleep();
+  traceStep(display._bus, who, "invert-sleep");
+  display.releaseBuffers();
+  if constexpr (!std::is_same<Driver, Ssd1677Driver>::value) free(driver._grayBase);
+}
+
+static void traceStock() {
+  traceDriver<Ssd1677Driver>("ssd1677");
+  traceDriver<Uc8179Driver>("uc8179");
+  for (uint8_t variant : {0x02, 0x68}) {
+    BoardConfig::ACTIVE.displayControllerVariant = variant;
+    traceDriver<Uc8279X4Driver>(variant == 0x02 ? "uc8279x4-02" : "uc8279x4-68");
+  }
+  traceFacade<Ssd1677Driver>("facade-ssd1677");
+  traceFacade<Uc8179Driver>("facade-uc8179");
+  traceFacade<Uc8279X4Driver>("facade-uc8279x4");
+}
+
+#if FREEINK_CAP_DISPLAY_LAB
+// --- display lab ------------------------------------------------------------
+static std::vector<uint8_t> commands(const EpdBus& bus) {
+  std::vector<uint8_t> out;
+  for (const auto& w : bus.writes) out.push_back(w.command);
+  return out;
+}
+
+static const Bytes& written(const EpdBus& bus, size_t index) { return bus.writes.at(index).bytes; }
+
+// A framebuffer-order plane as the UltraChip streamPlane lays it over 600 gates.
+static Bytes ucPlane(const Bytes& in, bool reverse, unsigned gateOffset) {
+  Bytes out(60000, 0xff);
+  for (unsigned y = 0; y < 480; ++y) {
+    const unsigned row = reverse ? 479 - y : y;
+    std::copy(in.begin() + row * 100, in.begin() + (row + 1) * 100, out.begin() + (gateOffset + y) * 100);
+  }
+  return out;
+}
+
+static Bytes labTables() {
+  Bytes t(5 * 43);
+  for (unsigned r = 0; r < 5; ++r) {
+    t[r * 43] = uint8_t(0x20 + r);
+    for (unsigned i = 1; i < 43; ++i) t[r * 43 + i] = uint8_t(r * 50 + i);
+  }
+  return t;
+}
+
+static void assertNone(const EpdBus& bus, std::initializer_list<uint8_t> forbidden) {
+  for (const auto& w : bus.writes)
+    for (uint8_t c : forbidden) assert(w.command != c);
+}
+
+// UltraChip: PWR (0x01), POF (0x02), VDCS (0x82) and the OTP program/active
+// program commands (0xA0/0xA1) never appear in a lab session.
+static const std::initializer_list<uint8_t> kUcForbidden = {0x01, 0x02, 0x82, 0xA0, 0xA1};
+
+struct UcLabExpect {
+  bool reverse;
+  unsigned gateOffset;
+  Bytes psrLab, psrOtp, cdiLab, cdiStock;
+  uint8_t pllStock;
+  size_t tableBytes;
+  bool psrAfterPon;
+};
+
+template<class Driver>
+static void testLabUltraChip(const UcLabExpect& x) {
+  Driver d;
+  EpdBus bus;
+  d.begin(bus);
+  const auto p1 = frame(41), p2 = frame(67), tables = labTables();
+  uint32_t busyUs = 123;
+  bus.clear();
+  assert(d.labSupported());
+  // No waveform yet: PSR REG is still 0, so a scan would run OTP; refused.
+  assert(!d.labScan(bus, p1.data(), p2.data(), busyUs) && busyUs == 0);
+  // Malformed uploads are refused before any bus traffic.
+  Bytes swapped = tables;
+  std::swap(swapped[2 * 43], swapped[3 * 43]);
+  assert(!d.labUploadWaveform(bus, tables.data(), tables.size() - 1));
+  assert(!d.labUploadWaveform(bus, tables.data(), tables.size() + 1));
+  assert(!d.labUploadWaveform(bus, swapped.data(), swapped.size()));
+  assert(!d.labUploadWaveform(bus, nullptr, tables.size()));
+  assert(!d.labScan(bus, p1.data(), p2.data(), busyUs));
+  assert(bus.writes.empty() && bus.waits == 0);
+  // labEnd outside a session touches nothing.
+  d.labEnd(bus);
+  assert(bus.writes.empty());
+
+  assert(d.labUploadWaveform(bus, tables.data(), tables.size()));
+  assert((commands(bus) == std::vector<uint8_t>{0x00, 0x20, 0x21, 0x22, 0x23, 0x24, 0x50}));
+  assert(written(bus, 0) == x.psrLab);
+  for (unsigned r = 0; r < 5; ++r) {
+    Bytes expected(tables.begin() + r * 43 + 1, tables.begin() + (r + 1) * 43);
+    expected.resize(x.tableBytes, 0);
+    assert(written(bus, 1 + r) == expected);
+  }
+  assert(written(bus, 6) == x.cdiLab);
+  assert(bus.waits == 1);
+  assertNone(bus, kUcForbidden);
+
+  bus.clear();
+  assert(d.labSetFrameRate(bus, 0x09));
+  assert((commands(bus) == std::vector<uint8_t>{0x30}) && written(bus, 0) == Bytes{0x09});
+
+  for (unsigned scan = 0; scan < 2; ++scan) {
+    bus.clear();
+    busyUs = 0;
+    assert(d.labScan(bus, p1.data(), p2.data(), busyUs));
+    assert(busyUs > 0);
+    std::vector<uint8_t> expected = {0x10, 0x13};
+    if (scan == 0) expected.push_back(0x04);  // PON once; power stays on after
+    if (x.psrAfterPon) expected.push_back(0x00);
+    expected.push_back(0x12);
+    assert(commands(bus) == expected);
+    // Raw planes: no inversion, no fold; only the driver's gate mapping.
+    assert(written(bus, 0) == ucPlane(p1, x.reverse, x.gateOffset));
+    assert(written(bus, 1) == ucPlane(p2, x.reverse, x.gateOffset));
+    assert(bus.writes[0].transactions == 1 && bus.writes[1].transactions == 1);
+    if (x.psrAfterPon) assert(written(bus, expected.size() - 2) == x.psrLab);
+    assert(bus.waits == (scan == 0 ? 3u : 2u));  // ready, [PON], DRF
+    assert(d._isScreenOn);
+    assertNone(bus, kUcForbidden);
+  }
+
+  bus.clear();
+  d.labEnd(bus);
+  assert((commands(bus) == std::vector<uint8_t>{0x00, 0x50, 0x30, 0xE5}));
+  assert(written(bus, 0) == x.psrOtp && written(bus, 1) == x.cdiStock);
+  assert(written(bus, 2) == Bytes{x.pllStock} && written(bus, 3) == Bytes{0x1E});
+  assert(d._needFullClear && !d._oldPlaneValid);
+  assertNone(bus, kUcForbidden);
+  bus.clear();
+  d.labEnd(bus);
+  assert(bus.writes.empty());
+  // The session's waveform is gone with it.
+  assert(!d.labScan(bus, p1.data(), p2.data(), busyUs) && bus.writes.empty());
+
+  // The next ordinary Fast is the full GC from a white OLD plane, not a DU.
+  d.display(bus, p1.data(), nullptr, RefreshMode::Fast, false);
+  assert(lastRegister(bus, 0xE5) == 0x1E);
+  assert(lastPlane(bus, 0x10) == ucPlane(p1, x.reverse, x.gateOffset));  // post-refresh sync
+  bool whiteSeed = false;
+  for (const auto& w : bus.writes) {
+    assert(w.command != 0x91);
+    if (w.command == 0x10 && w.bytes == Bytes(60000, 0xff)) whiteSeed = true;
+  }
+  assert(whiteSeed);
+  free(d._grayBase);
+}
+
+static void testLabUc8179DirectGrayExit() {
+  // A lab session entered while direct gray owns PWR/VDCS resets to the stock
+  // B/W power setup first and writes no voltage register itself.
+  Uc8179Driver d;
+  EpdBus bus;
+  d.begin(bus);
+  const auto bw = frame(3), tables = labTables();
+  d.beginGrayscale(bus, bw.data(), GrayscaleMode::Direct, RefreshMode::Half, false);
+  assert(d._directGrayConfigured);
+  bus.clear();
+  assert(d.labUploadWaveform(bus, tables.data(), tables.size()));
+  assert(!d._directGrayConfigured);
+  assertNone(bus, kUcForbidden);
+  const auto c = commands(bus);
+  assert(c.front() == 0x00 && c[1] == 0x61);  // initController after reset
+  const std::vector<uint8_t> upload = {0x00, 0x20, 0x21, 0x22, 0x23, 0x24, 0x50};
+  assert(std::vector<uint8_t>(c.end() - 7, c.end()) == upload);
+  d.labEnd(bus);
+  free(d._grayBase);
+}
+
+static void testLabSsd1677() {
+  Ssd1677Driver d;
+  EpdBus bus;
+  d.begin(bus);
+  const auto bw = frame(9), p1 = frame(41), p2 = frame(67);
+  d.display(bus, bw.data(), nullptr, RefreshMode::Fast, false);  // consume the boot clean
+  bus.clear();
+  Bytes lut(112);
+  for (size_t i = 0; i < lut.size(); ++i) lut[i] = uint8_t(i * 7 + 3);
+  uint32_t busyUs = 5;
+  assert(d.labSupported());
+  assert(!d.labSetFrameRate(bus, 0x22));  // rate lives in the LUT bytes
+  assert(!d.labScan(bus, p1.data(), p2.data(), busyUs) && busyUs == 0);
+  assert(!d.labUploadWaveform(bus, lut.data(), 110));
+  assert(!d.labUploadWaveform(bus, nullptr, 112));
+  assert(bus.writes.empty());
+  d.labEnd(bus);
+  assert(!d._needsGrayClear);
+
+  assert(d.labUploadWaveform(bus, lut.data(), lut.size()));
+  assert((commands(bus) == std::vector<uint8_t>{0x32, 0x03, 0x04, 0x2C, 0x3C}));
+  assert(written(bus, 0) == Bytes(lut.begin(), lut.begin() + 105));
+  assert(written(bus, 1) == Bytes{lut[105]});
+  assert(written(bus, 2) == Bytes(lut.begin() + 106, lut.begin() + 109));
+  assert(written(bus, 3) == Bytes{lut[109]});
+  assert(written(bus, 4) == Bytes{0xC0});  // borderWaveformGray
+  assert(!d._customLutActive);  // ordinary refreshes keep their own LUT selection
+
+  for (unsigned scan = 0; scan < 2; ++scan) {
+    bus.clear();
+    assert(d.labScan(bus, p1.data(), p2.data(), busyUs) && busyUs > 0);
+    assert((commands(bus) ==
+            std::vector<uint8_t>{0x11, 0x44, 0x45, 0x4E, 0x4F, 0x24, 0x26, 0x21, 0x22, 0x20}));
+    assert(written(bus, 0) == Bytes{0x01});
+    assert((written(bus, 1) == Bytes{0x00, 0x00, 0x1F, 0x03}));
+    assert((written(bus, 2) == Bytes{0xDF, 0x01, 0x00, 0x00}));
+    assert((written(bus, 3) == Bytes{0x00, 0x00}));
+    assert((written(bus, 4) == Bytes{0xDF, 0x01}));
+    assert(written(bus, 5) == p1 && written(bus, 6) == p2);  // raw, framebuffer order
+    assert(written(bus, 7) == Bytes{0x00} && written(bus, 8) == Bytes{0xCC} && written(bus, 9).empty());
+    assert(bus.waits == 1 && d._isScreenOn);
+    assertNone(bus, {0x30, 0x36, 0x39, 0x32, 0x03, 0x04, 0x2C});
+  }
+  bus.clear();
+  d.labEnd(bus);
+  assert(bus.writes.empty() && d._needsGrayClear);
+  assert(!d.labScan(bus, p1.data(), p2.data(), busyUs));
+  // The next Fast is promoted to the clean HALF (stock 0xD7), both planes rewritten.
+  d.display(bus, bw.data(), nullptr, RefreshMode::Fast, false);
+  assert(lastRegister(bus, 0x22) == 0xD7);
+  assert(lastPlane(bus, 0x24) == bw && lastPlane(bus, 0x26) == bw);
+}
+
+static void testLabFacade() {
+  {
+    BwOnlyDriver bw;
+    FreeInkDisplay display(1, 2, 3, 4, 5, 6);
+    display._driver = &bw;
+    const auto t = labTables(), p = frame(1);
+    uint32_t busyUs = 9;
+    assert(!display.labSupported());
+    assert(!display.labUploadWaveform(t.data(), t.size()));
+    assert(!display.labSetFrameRate(1));
+    assert(!display.labScan(p.data(), p.data(), busyUs) && busyUs == 0);
+    display.labEnd();
+    assert(display._bus.writes.empty());
+  }
+  Uc8179Driver driver;
+  FreeInkDisplay display(1, 2, 3, 4, 5, 6);
+  display._driver = &driver;
+  display.begin();
+  const auto fb = frame(19), p1 = frame(41), p2 = frame(67), tables = labTables();
+  std::memcpy(display.getFrameBuffer(), fb.data(), fb.size());
+  assert(display.labSupported());
+  uint32_t busyUs = 0;
+  // Inverted output: the planes would go out raw, so every lab call refuses.
+  display.setInverted(true);
+  display._bus.clear();
+  assert(!display.labUploadWaveform(tables.data(), tables.size()));
+  assert(!display.labSetFrameRate(0x09));
+  assert(!display.labScan(p1.data(), p2.data(), busyUs));
+  display.labEnd();
+  assert(display._bus.writes.empty());
+  display.setInverted(false);
+  display.displayBuffer(FreeInkDisplay::FULL_REFRESH);
+
+  // A pending async refresh is finished before the lab touches the bus.
+  display.displayBufferAsync(FreeInkDisplay::FAST_REFRESH);
+  assert(display.isRefreshPending());
+  display._bus.clear();
+  assert(display.labUploadWaveform(tables.data(), tables.size()));
+  assert(!display.isRefreshPending());
+  const auto c = commands(display._bus);
+  assert(std::find(c.begin(), c.end(), 0x10) < std::find(c.begin(), c.end(), 0x20));  // DTM1 sync first
+  assert(display.labSetFrameRate(0x09));
+  assert(display.labScan(p1.data(), p2.data(), busyUs) && busyUs > 0);
+  assert(!display._shadowValid && !display._redRamSynced);
+  assert(lastPlane(display._bus, 0x10) == ucPlane(p1, true, 0));
+  display._bus.clear();
+  display.labEnd();
+  assert((commands(display._bus) == std::vector<uint8_t>{0x00, 0x50, 0x30, 0xE5}));
+  display._bus.clear();
+  display.displayBuffer(FreeInkDisplay::FAST_REFRESH);
+  assert(lastRegister(display._bus, 0xE5) == 0x1E);  // full resync, not the DU
+  display.releaseBuffers();
+  free(driver._grayBase);
+
+  // SSD1677 through the facade: an open absolute gray pass is cancelled and
+  // the planes reach BW/RED RAM unmodified.
+  Ssd1677Driver ssd;
+  FreeInkDisplay x4(1, 2, 3, 4, 5, 6);
+  x4._driver = &ssd;
+  x4.begin();
+  assert(x4.displayGrayscaleBase(GrayscaleMode::Absolute));
+  Bytes lut(112, 0);
+  assert(x4.labUploadWaveform(lut.data(), lut.size()));
+  assert(x4._grayscaleMode == GrayscaleMode::Overlay);
+  assert(!x4.labSetFrameRate(0x22));
+  assert(x4.labScan(p1.data(), p2.data(), busyUs));
+  assert(lastPlane(x4._bus, 0x24) == p1 && lastPlane(x4._bus, 0x26) == p2);
+  x4.labEnd();
+  assert(ssd._needsGrayClear);
+  x4.releaseBuffers();
+}
+
+static void testDisplayLab() {
+  testLabSsd1677();
+  testLabUltraChip<Uc8179Driver>({true, 0, {0x3F, 0x0A}, {0x1F, 0x0A}, {0x29, 0x07}, {0xA9, 0x07}, 0x06, 42, false});
+  for (uint8_t variant : {0x02, 0x67, 0x68}) {
+    BoardConfig::ACTIVE.displayControllerVariant = variant;
+    testLabUltraChip<Uc8279X4Driver>({false, 120, {0x37, 0x4D}, {0x17, 0x4D}, {0x97}, {0x97}, 0x0E, 49, true});
+  }
+  BoardConfig::ACTIVE.displayControllerVariant = 0x68;
+  testLabUc8179DirectGrayExit();
+  testLabFacade();
+  std::puts("Display lab uploads, frame rate, raw-plane scans, refusals and labEnd resync passed");
+}
+#endif
+
 int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "trace") == 0) {
+    traceStock();
+    return 0;
+  }
   if (argc > 1 && std::strcmp(argv[1], "metalio") == 0) {
     testMetalio();
     std::puts("Metalio refresh, temperature, grayscale fallback and async power-down passed");
@@ -639,5 +1043,8 @@ int main(int argc, char** argv) {
   testSsd();
   testAsyncFrame<Uc8179Driver>();
   testAsyncFrame<Uc8279X4Driver>();
+#if FREEINK_CAP_DISPLAY_LAB
+  testDisplayLab();
+#endif
   std::puts("Pro plane bytes, transaction counts, clean refreshes, power state and async frame ownership passed");
 }

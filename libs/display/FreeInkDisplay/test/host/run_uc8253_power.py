@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+# Set FREEINK_CAP_DISPLAY_LAB=1 in the environment to build with the display lab compiled in.
+LAB_FLAG = os.environ.get("FREEINK_CAP_DISPLAY_LAB")
+LAB = ["-DFREEINK_CAP_DISPLAY_LAB=" + LAB_FLAG] if LAB_FLAG else []
 SOURCE = HERE.parents[1] / "src"
 with tempfile.TemporaryDirectory(prefix="uc8253_power-test-") as directory:
     root = Path(directory)
@@ -110,6 +113,6 @@ int main() {
 """)
     exe = root / "test_uc8253_power"
     subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
-                    "-Wno-unused-parameter", "-I"+str(root), str(root / "test.cpp"),
+                    "-Wno-unused-parameter", *LAB, "-I"+str(root), str(root / "test.cpp"),
                     str(root / "driver/Uc8253X3Driver.cpp"), "-o", str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
